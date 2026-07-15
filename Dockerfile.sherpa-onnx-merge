@@ -21,9 +21,13 @@ ARG PATCH_IMAGE=sherpa-onnx-patch:latest
 COPY --from=${PATCH_IMAGE} / /
 
 # 运行时：CANN 库(来自 8.5.1) + sherpa-onnx 库(来自补丁) 都加入搜索路径
+#  - /opt/sherpa-patch：补丁 Python 包（onnxruntime-cann / sherpa_onnx / fastapi / ...）
+#  - /opt/sherpa-patch/onnxruntime：libonnxruntime 所在（C++ 侧链接需要）
+#  - /usr/local/lib：sherpa-onnx 动态库（来自补丁）
+#  - CANN lib64：libascendcl 等（来自 8.5.1）
 ENV ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
-ENV LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/lib:${LD_LIBRARY_PATH}
-ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages:${PYTHONPATH}
+ENV LD_LIBRARY_PATH=/opt/sherpa-patch/onnxruntime:/usr/local/lib:/usr/local/Ascend/ascend-toolkit/latest/lib64:${LD_LIBRARY_PATH}
+ENV PYTHONPATH=/opt/sherpa-patch:${PYTHONPATH}
 ENV MODEL_DIR=/app/models
 
 EXPOSE 8000

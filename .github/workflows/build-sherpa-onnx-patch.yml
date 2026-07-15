@@ -33,14 +33,22 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # 构建补丁镜像并加载进本地 daemon（单平台 arm64，便于导出 tar）
+      # 直接用 docker buildx build + tee 抓全量日志，失败时上传便于诊断
       - name: Build patch image (load locally)
-        uses: docker/build-push-action@v6
+        run: |
+          set -e -o pipefail
+          docker buildx build -f Dockerfile.sherpa-onnx-patch \
+            --platform linux/arm64 --load \
+            -t sherpa-onnx-patch:latest . 2>&1 | tee build.log
+
+      # 失败时把构建日志作为 artifact 上传（在 run 页面可下载，贴出尾部即可定位）
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          file: Dockerfile.sherpa-onnx-patch
-          platforms: linux/arm64
-          load: true
-          tags: sherpa-onnx-patch:latest
+          name: build-log
+          path: build.log
+          retention-days: 7
 
       # 导出 tar（离线交付物）
       - name: Save patch image to tar
