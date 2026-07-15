@@ -1,0 +1,54 @@
+name: Build sherpa-onnx Ascend Patch (offline tar)
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "Dockerfile.sherpa-onnx-patch"
+      - "Dockerfile.sherpa-onnx-merge"
+      - "app.sherpa-onnx.py"
+      - "verify_sherpa_onnx.py"
+      - ".github/workflows/build-sherpa-onnx-patch.yml"
+  workflow_dispatch:
+
+# 目标：构建"纯增量补丁镜像"并导出为 tar 包（离线服务器用，不依赖 ghcr 拉取）
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 源码编译 sherpa-onnx(链接 onnxruntime-cann) 在 QEMU 模拟 arm64 下较慢，给足时间
+    timeout-minutes: 360
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (arm64 模拟)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 构建补丁镜像并加载进本地 daemon（单平台 arm64，便于导出 tar）
+      - name: Build patch image (load locally)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.sherpa-onnx-patch
+          platforms: linux/arm64
+          load: true
+          tags: sherpa-onnx-patch:latest
+
+      # 导出 tar（离线交付物）
+      - name: Save patch image to tar
+        run: docker save sherpa-onnx-patch:latest -o sherpa-onnx-patch.tar
+
+      - name: Upload patch tar (offline delivery)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sherpa-onnx-patch
+          path: sherpa-onnx-patch.tar
+          retention-days: 30

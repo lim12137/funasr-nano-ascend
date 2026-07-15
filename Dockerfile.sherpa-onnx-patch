@@ -1,0 +1,66 @@
+# ============================================================
+# sherpa-onnx 离线补丁镜像（纯增量：只含"缺失部分" + "修改部分"）
+# ------------------------------------------------------------
+# 原则：不打包 8.5.1 原始镜像。最终补丁镜像 = FROM scratch，只放 delta。
+#   build 阶段：基于 8.5.1（CI 有网）编译 sherpa-onnx(Ascend) + 装缺失 Python 包
+#   patch 阶段：FROM scratch，仅拷贝新增/修改的文件
+# 部署（离线服务器）：用 Dockerfile.sherpa-onnx-merge 把本补丁镜像合并到
+#   8.5.1 原始镜像上，得到可运行的服务镜像。
+# ============================================================
+
+ARG BASE_IMAGE=ghcr.io/lim12137/funasr-cann:8.5.1-validate
+FROM ${BASE_IMAGE} AS build
+
+# ---- 1. 编译工具链（仅 build 阶段用，不进入最终补丁镜像）----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- 2. 缺失的 Python 包统一装到独立前缀，便于只拷贝"新增"部分 ----
+RUN python3 -m pip install --no-cache-dir --target=/opt/patch/site-packages \
+        onnxruntime-cann fastapi uvicorn
+
+# ---- 3. 探测 onnxruntime-cann 的 include/lib（供 sherpa-onnx 链接）----
+RUN set -e; \
+    ORT_PKG=/opt/patch/site-packages/onnxruntime; \
+    ls "${ORT_PKG}/include/onnxruntime/core/session/onnxruntime_cxx_api.h"; \
+    echo "ORT_INC=${ORT_PKG}/include" > /etc/sherpa-ort.env; \
+    echo "ORT_LIB=${ORT_PKG}" >> /etc/sherpa-ort.env; \
+    cat /etc/sherpa-ort.env
+
+# ---- 4. 源码编译 sherpa-onnx（Ascend NPU）----
+RUN set -e; \
+    source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh; \
+    source /etc/sherpa-ort.env; \
+    git clone --depth 1 https://github.com/k2-fsa/sherpa-onnx && \
+    cd sherpa-onnx && mkdir build && cd build && \
+    cmake \
+      -DSHERPA_ONNX_ENABLE_ASCEND_NPU=ON \
+      -DSHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE=ON \
+      -DSHERPA_ONNXRUNTIME_INCLUDE_DIR="${ORT_INC}" \
+      -DSHERPA_ONNXRUNTIME_LIB_DIR="${ORT_LIB}" \
+      -DSHERPA_ONNX_ENABLE_PYTHON=ON \
+      -DBUILD_SHARED_LIBS=ON \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      .. && \
+    make -j"$(nproc)" && make install && \
+    cd / && rm -rf sherpa-onnx
+
+# 构建期自检：确认 sherpa-onnx 二进制依赖 libascendcl.so（需 CANN，合并后才有）
+RUN (ldconfig 2>/dev/null || true); \
+    ldd /usr/local/bin/sherpa-onnx 2>/dev/null | grep -i ascendcl || echo "[WARN] libascendcl.so 未解析（合并到 8.5.1 后由 CANN 提供）"
+
+# ===================== 最终：thin delta 镜像（不含 8.5.1）=====================
+FROM scratch
+
+# 缺失的 Python 包（onnxruntime-cann / fastapi / uvicorn + 依赖）
+COPY --from=build /opt/patch/site-packages/ /usr/local/lib/python3.11/site-packages/
+
+# sherpa-onnx 编译产物（二进制 + 动态库 + python 包）
+COPY --from=build /usr/local/bin/sherpa-onnx /usr/local/bin/sherpa-onnx
+COPY --from=build /usr/local/lib/libsherpa-onnx* /usr/local/lib/
+COPY --from=build /usr/local/lib/python3.11/site-packages/sherpa_onnx /usr/local/lib/python3.11/site-packages/sherpa_onnx
+
+# 修改的文件（覆盖原 app.py；新增 verify）
+COPY app.sherpa-onnx.py /app/app.py
+COPY verify_sherpa_onnx.py /app/verify_sherpa_onnx.py

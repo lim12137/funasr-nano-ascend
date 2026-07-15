@@ -1,0 +1,30 @@
+# ============================================================
+# 部署合并（在离线服务器上执行）
+# ------------------------------------------------------------
+# 把"纯增量补丁镜像"合并到 8.5.1 原始镜像上，得到可运行的服务镜像。
+# 前置（离线服务器本地需已存在）：
+#   1) 8.5.1 原始镜像：ghcr.io/lim12137/funasr-cann:8.5.1-validate
+#   2) 补丁镜像（由 Dockerfile.sherpa-onnx-patch 构建，docker save/load 传入）
+# 用法：
+#   docker load -i sherpa-onnx-patch.tar          # 先导入补丁镜像
+#   docker build -f Dockerfile.sherpa-onnx-merge \
+#       --build-arg PATCH_IMAGE=sherpa-onnx-patch:latest \
+#       -t funasr-nano-ascend:sherpa-onnx-merged .
+# ============================================================
+
+ARG BASE_IMAGE=ghcr.io/lim12137/funasr-cann:8.5.1-validate
+FROM ${BASE_IMAGE}
+
+ARG PATCH_IMAGE=sherpa-onnx-patch:latest
+
+# 把补丁镜像里的 delta 文件覆盖合并到 8.5.1 上（路径相同即覆盖，如 /app/app.py）
+COPY --from=${PATCH_IMAGE} / /
+
+# 运行时：CANN 库(来自 8.5.1) + sherpa-onnx 库(来自补丁) 都加入搜索路径
+ENV ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
+ENV LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/lib:${LD_LIBRARY_PATH}
+ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages:${PYTHONPATH}
+ENV MODEL_DIR=/app/models
+
+EXPOSE 8000
+CMD ["python", "app.py"]
