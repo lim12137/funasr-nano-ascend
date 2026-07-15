@@ -46,21 +46,35 @@ RUN set -e; \
       rm -rf /tmp/ort.tgz /tmp/onnxruntime-${ORT_VER}; \
     fi; \
     ORT_LIB=$(dirname $(find "${ORT_PKG}" -name 'libonnxruntime*.so*' 2>/dev/null | head -1)); \
+    if [ -z "${ORT_LIB}" ] || [ ! -d "${ORT_LIB}" ]; then \
+      echo "[ERROR] 未找到 onnxruntime-cann 的 libonnxruntime*.so，请检查 wheel 布局"; exit 1; \
+    fi; \
+    # sherpa-onnx 的 cmake 直接找 \${ORT_LIB}/libonnxruntime.so，确保有未版本化的符号链接 \
+    if [ ! -e "${ORT_LIB}/libonnxruntime.so" ]; then \
+      SRC=$(find "${ORT_LIB}" -maxdepth 1 -name 'libonnxruntime.so*' 2>/dev/null | head -1); \
+      if [ -n "${SRC}" ]; then ln -sf "${SRC}" "${ORT_LIB}/libonnxruntime.so"; echo "[INFO] 创建符号链接 ${ORT_LIB}/libonnxruntime.so -> ${SRC}"; fi; \
+    fi; \
     echo "ORT_INC=${ORT_INC}" > /etc/sherpa-ort.env; \
     echo "ORT_LIB=${ORT_LIB}" >> /etc/sherpa-ort.env; \
     cat /etc/sherpa-ort.env
 
 # ---- 4. 源码编译 sherpa-onnx（Ascend NPU）----
+# 关键：sherpa-onnx 的 cmake/onnxruntime.cmake 用 ENV{SHERPA_ONNXRUNTIME_INCLUDE_DIR/LIB_DIR}
+#       读取预装 ORT 路径（不是 -D 参数！），必须以环境变量导出，否则会走
+#       download_onnxruntime() 下载无 Ascend EP 的官方 ORT 并失败。
 RUN set -e; \
-    source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh; \
+    source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh 2>/dev/null || \
+      source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || \
+      echo "[WARN] set_env.sh 未找到，依赖 cmake 默认 CANN 路径"; \
     source /etc/sherpa-ort.env; \
+    export SHERPA_ONNXRUNTIME_INCLUDE_DIR="${ORT_INC}"; \
+    export SHERPA_ONNXRUNTIME_LIB_DIR="${ORT_LIB}"; \
+    echo "[INFO] 使用预装 ORT: INC=${SHERPA_ONNXRUNTIME_INCLUDE_DIR} LIB=${SHERPA_ONNXRUNTIME_LIB_DIR}"; \
     git clone --depth 1 https://github.com/k2-fsa/sherpa-onnx && \
     cd sherpa-onnx && mkdir build && cd build && \
     cmake \
       -DSHERPA_ONNX_ENABLE_ASCEND_NPU=ON \
       -DSHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE=ON \
-      -DSHERPA_ONNXRUNTIME_INCLUDE_DIR="${ORT_INC}" \
-      -DSHERPA_ONNXRUNTIME_LIB_DIR="${ORT_LIB}" \
       -DSHERPA_ONNX_ENABLE_PYTHON=ON \
       -DBUILD_SHARED_LIBS=ON \
       -DCMAKE_INSTALL_PREFIX=/usr/local \
