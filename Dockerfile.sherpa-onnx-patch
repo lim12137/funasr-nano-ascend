@@ -21,10 +21,24 @@ RUN python3 -m pip install --no-cache-dir --target=/opt/patch/site-packages \
         onnxruntime-cann fastapi uvicorn
 
 # ---- 3. 探测 onnxruntime-cann 的 include/lib（供 sherpa-onnx 链接）----
+# 注意：onnxruntime-cann 的 pip wheel 通常不含 C++ 头，需按需从 onnxruntime 源码取。
 RUN set -e; \
     ORT_PKG=/opt/patch/site-packages/onnxruntime; \
-    ls "${ORT_PKG}/include/onnxruntime/core/session/onnxruntime_cxx_api.h"; \
-    echo "ORT_INC=${ORT_PKG}/include" > /etc/sherpa-ort.env; \
+    if [ -f "${ORT_PKG}/include/onnxruntime/core/session/onnxruntime_cxx_api.h" ]; then \
+      ORT_INC="${ORT_PKG}/include"; \
+      echo "[INFO] 在 wheel 中找到 C++ 头"; \
+    else \
+      echo "[INFO] wheel 不含 C++ 头，按版本从 onnxruntime 源码取头"; \
+      ORT_VER=$(python3 -c "import onnxruntime; print(onnxruntime.__version__)" 2>/dev/null \
+                || pip show onnxruntime-cann 2>/dev/null | awk -F': ' '/^Version/{print $2}'); \
+      echo "[INFO] onnxruntime 版本: ${ORT_VER}"; \
+      curl -fsSL "https://github.com/microsoft/onnxruntime/archive/refs/tags/v${ORT_VER}.tar.gz" -o /tmp/ort.tgz; \
+      mkdir -p /tmp/ort && tar -xzf /tmp/ort.tgz -C /tmp; \
+      cp -r "/tmp/onnxruntime-${ORT_VER}/include/onnxruntime" /usr/local/include/; \
+      ORT_INC=/usr/local/include; \
+      rm -rf /tmp/ort.tgz /tmp/onnxruntime-${ORT_VER}; \
+    fi; \
+    echo "ORT_INC=${ORT_INC}" > /etc/sherpa-ort.env; \
     echo "ORT_LIB=${ORT_PKG}" >> /etc/sherpa-ort.env; \
     cat /etc/sherpa-ort.env
 
