@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: read
+      packages: read   # 拉取私有基础镜像 ghcr.io/lim12137/funasr-cann:8.5.1-validate 需要
 
     steps:
       - name: Checkout
@@ -32,13 +33,25 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # 登录 GHCR，否则无法拉取私有基础镜像。
+      # 若跨仓库私有包需用 PAT 拉取，请在仓库 Secrets 配置 GHCR_PAT（read:packages）。
+      - name: Login to GHCR
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+        run: |
+          if [ -n "$GHCR_PAT" ]; then
+            echo "$GHCR_PAT" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          else
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          fi
+
       # 构建补丁镜像并加载进本地 daemon（单平台 arm64，便于导出 tar）
       # 直接用 docker buildx build + tee 抓全量日志，失败时上传便于诊断
       - name: Build patch image (load locally)
         run: |
           set -e -o pipefail
           docker buildx build -f Dockerfile.sherpa-onnx-patch \
-            --platform linux/arm64 --load \
+            --platform linux/arm64 --load --progress=plain \
             -t sherpa-onnx-patch:latest . 2>&1 | tee build.log
 
       # 失败时把构建日志作为 artifact 上传（在 run 页面可下载，贴出尾部即可定位）

@@ -7,9 +7,9 @@
 # 部署（离线服务器）：用 Dockerfile.sherpa-onnx-merge 把本补丁镜像合并到
 #   8.5.1 原始镜像上，得到可运行的服务镜像。
 #
-# 版本无关设计：补丁 Python 包统一装入 /opt/sherpa-patch，合并后只需
-#   PYTHONPATH=/opt/sherpa-patch 即可，避免硬编码 python3.x 路径
-#   （基础镜像可能是 3.10 或 3.11，原先写死 python3.11 会导致 COPY 失败）。
+# 版本无关设计：所有新增 Python 包与编译出的 sherpa_onnx 都归集到
+#   /opt/sherpa-patch（不再硬编码 pythonX.Y），由合并镜像通过
+#   PYTHONPATH=/opt/sherpa-patch 统一加载，避免 python 主版本不匹配。
 # ============================================================
 
 ARG BASE_IMAGE=ghcr.io/lim12137/funasr-cann:8.5.1-validate
@@ -20,23 +20,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# ---- 2. 缺失的 Python 包统一装到与版本无关的 /opt/sherpa-patch ----
-#  - onnxruntime-cann 锁 1.23.2：该版本同时提供 cp310/cp311 的 aarch64 轮子；
-#    最新的 1.24.4 已无 cp310 轮子，若基础镜像为 py3.10 会 no matching distribution。
-#  - --no-deps：避免把 numpy 拖进补丁目录，复用基础镜像自带 numpy（防止 ABI 冲突）。
-#  - fastapi/uvicorn 正常装依赖。soundfile 也以 --no-deps 加入（依赖 cffi/numpy 由基础镜像提供）。
-RUN python3 -m pip install --no-cache-dir --no-deps --target=/opt/sherpa-patch \
-        onnxruntime-cann==1.23.2 soundfile \
-    && python3 -m pip install --no-cache-dir --target=/opt/sherpa-patch \
-        fastapi uvicorn
+# ---- 2. 缺失的 Python 包统一装到固定前缀 /opt/sherpa-patch（版本无关）----
+# 锁版本：onnxruntime-cann 1.23.2 同时提供 aarch64 的 cp310 与 cp311 轮子，
+#        覆盖 base 镜像常见的 python3.10 / python3.11（最新 1.24.x 已无 cp310 轮子，
+#        在 python3.10 环境下 pip 会报 no matching distribution）。
+RUN python3 -m pip install --no-cache-dir --target=/opt/sherpa-patch \
+        "onnxruntime-cann==1.23.2" fastapi uvicorn
 
-# 诊断信息：打印 python / onnxruntime 版本与补丁目录内容（构建失败时便于定位）
-RUN set -e; \
-    echo "[INFO] python: $(python3 --version 2>&1)"; \
-    python3 -c "import onnxruntime, sys; print('[INFO] onnxruntime', onnxruntime.__version__, 'providers', onnxruntime.get_available_providers())" 2>&1 || true; \
-    echo "[INFO] /opt/sherpa-patch 顶层:"; ls -1 /opt/sherpa-patch | sed 's/^/    /' || true
-
-# ---- 3. 探测 onnxruntime-cann 的 include/lib（供 sherpa-onnx 链接）----
+# ---- 3. 探测 onnxruntime 的 include/lib（供 sherpa-onnx 链接）----
 # 注意：onnxruntime-cann 的 pip wheel 通常不含 C++ 头，需按需从 onnxruntime 源码取。
 RUN set -e; \
     ORT_PKG=/opt/sherpa-patch/onnxruntime; \
@@ -54,8 +45,9 @@ RUN set -e; \
       ORT_INC=/usr/local/include; \
       rm -rf /tmp/ort.tgz /tmp/onnxruntime-${ORT_VER}; \
     fi; \
+    ORT_LIB=$(dirname $(find "${ORT_PKG}" -name 'libonnxruntime*.so*' 2>/dev/null | head -1)); \
     echo "ORT_INC=${ORT_INC}" > /etc/sherpa-ort.env; \
-    echo "ORT_LIB=${ORT_PKG}" >> /etc/sherpa-ort.env; \
+    echo "ORT_LIB=${ORT_LIB}" >> /etc/sherpa-ort.env; \
     cat /etc/sherpa-ort.env
 
 # ---- 4. 源码编译 sherpa-onnx（Ascend NPU）----
@@ -70,30 +62,21 @@ RUN set -e; \
       -DSHERPA_ONNXRUNTIME_INCLUDE_DIR="${ORT_INC}" \
       -DSHERPA_ONNXRUNTIME_LIB_DIR="${ORT_LIB}" \
       -DSHERPA_ONNX_ENABLE_PYTHON=ON \
-      -DSHERPA_ONNX_ENABLE_TESTS=OFF \
       -DBUILD_SHARED_LIBS=ON \
       -DCMAKE_INSTALL_PREFIX=/usr/local \
       .. && \
     make -j"$(nproc)" && make install && \
     cd / && rm -rf sherpa-onnx
 
-# ---- 4b. 把 sherpa_onnx python 包并入补丁目录（与 Python 大版本无关）----
+# ---- 5. 把编译出的 sherpa_onnx python 包归集到 /opt/sherpa-patch（版本无关）----
 RUN set -e; \
-    PYSP=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))"); \
+    PYSP=$(python3 -c "import site,sys; print(site.getsitepackages()[0])"); \
     if [ -d "${PYSP}/sherpa_onnx" ]; then \
-      cp -r "${PYSP}/sherpa_onnx" /opt/sherpa-patch/ && echo "[INFO] sherpa_onnx -> /opt/sherpa-patch"; \
+      cp -r "${PYSP}/sherpa_onnx" /opt/sherpa-patch/; \
+      echo "[INFO] 已归集 sherpa_onnx -> /opt/sherpa-patch (base python=${PYSP})"; \
     else \
-      echo "[WARN] 未找到 ${PYSP}/sherpa_onnx（运行时将缺失，请检查 sherpa-onnx 安装）"; \
+      echo "[WARN] 未在 ${PYSP} 找到 sherpa_onnx，请检查编译安装"; \
     fi
-
-# ---- 4c. 收集 sherpa-onnx 安装的动态库到独立目录（避免硬编码 python 版本）----
-RUN set -e; \
-    mkdir -p /opt/sherpa-lib; \
-    for pat in /usr/local/lib/libsherpa-onnx*.so* /usr/local/lib/libkaldifst*.so* \
-               /usr/local/lib/libfst*.so* /usr/local/lib/libkaldi-decoder*.so*; do \
-      for f in $pat; do [ -e "$f" ] && cp -a "$f" /opt/sherpa-lib/ || true; done; \
-    done; \
-    echo "[INFO] 收集到的动态库:"; ls -1 /opt/sherpa-lib | sed 's/^/    /' || true
 
 # 构建期自检：确认 sherpa-onnx 二进制依赖 libascendcl.so（需 CANN，合并后才有）
 RUN (ldconfig 2>/dev/null || true); \
@@ -102,12 +85,12 @@ RUN (ldconfig 2>/dev/null || true); \
 # ===================== 最终：thin delta 镜像（不含 8.5.1）=====================
 FROM scratch
 
-# 缺失的 Python 包（onnxruntime-cann / sherpa_onnx / fastapi / uvicorn / soundfile）
+# 缺失的 Python 包（onnxruntime-cann / fastapi / uvicorn / sherpa_onnx）统一目录
 COPY --from=build /opt/sherpa-patch/ /opt/sherpa-patch/
 
-# sherpa-onnx 编译产物（动态库 + 二进制）
-COPY --from=build /opt/sherpa-lib/ /usr/local/lib/
-COPY --from=build /usr/local/bin/sherpa-onnx* /usr/local/bin/
+# sherpa-onnx 编译产物（二进制 + 动态库）
+COPY --from=build /usr/local/bin/sherpa-onnx /usr/local/bin/sherpa-onnx
+COPY --from=build /usr/local/lib/libsherpa-onnx* /usr/local/lib/
 
 # 修改的文件（覆盖原 app.py；新增 verify）
 COPY app.sherpa-onnx.py /app/app.py

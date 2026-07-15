@@ -20,13 +20,10 @@ ARG PATCH_IMAGE=sherpa-onnx-patch:latest
 # 把补丁镜像里的 delta 文件覆盖合并到 8.5.1 上（路径相同即覆盖，如 /app/app.py）
 COPY --from=${PATCH_IMAGE} / /
 
-# 运行时：CANN 库(来自 8.5.1) + sherpa-onnx 库(来自补丁) 都加入搜索路径
-#  - /opt/sherpa-patch：补丁 Python 包（onnxruntime-cann / sherpa_onnx / fastapi / ...）
-#  - /opt/sherpa-patch/onnxruntime：libonnxruntime 所在（C++ 侧链接需要）
-#  - /usr/local/lib：sherpa-onnx 动态库（来自补丁）
-#  - CANN lib64：libascendcl 等（来自 8.5.1）
+# 运行时：CANN 库(来自 8.5.1) + sherpa-onnx 库(来自补丁) + onnxruntime-cann 的 .so(来自补丁)
+# 版本无关：所有新增 Python 包统一在 /opt/sherpa-patch，由 PYTHONPATH 加载。
 ENV ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
-ENV LD_LIBRARY_PATH=/opt/sherpa-patch/onnxruntime:/usr/local/lib:/usr/local/Ascend/ascend-toolkit/latest/lib64:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/lib:/opt/sherpa-patch:/opt/sherpa-patch/onnxruntime:/opt/sherpa-patch/onnxruntime/lib:${LD_LIBRARY_PATH}
 ENV PYTHONPATH=/opt/sherpa-patch:${PYTHONPATH}
 ENV MODEL_DIR=/app/models
 
